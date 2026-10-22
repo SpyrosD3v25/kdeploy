@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kdeploy"
+version = "0.1.0"
+description = "Small, project-independent Kaggle deployment CLI"
+requires-python = ">=3.11"
+dependencies = ["kaggle==2.1.0", "PyYAML>=6", "requests>=2.31"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.14", "mypy>=1.18", "types-PyYAML"]
+
+[project.scripts]
+kdeploy = "kdeploy:main"
+
+[tool.setuptools]
+py-modules = ["kdeploy", "remote"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "C4", "SIM"]
+
+[tool.mypy]
+check_untyped_defs = true
+ignore_missing_imports = true
+follow_imports = "silent"
