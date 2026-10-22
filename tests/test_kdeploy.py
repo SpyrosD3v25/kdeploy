@@ -194,13 +194,14 @@ def test_submit_and_reject_continuation_of_active_job(project,monkeypatch):
     calls=[]
     def push(path, **kwargs):
         calls.append(path)
-        return SimpleNamespace(error='', version_number=1, url='https://fixture')
+        return SimpleNamespace(error='', version_number=1, ref='smoke', url='https://www.kaggle.com/code/canonicaluser/smoke')
     client=SimpleNamespace(kernels_push=push,
                            kernels_status=lambda kernel:SimpleNamespace(status='RUNNING'))
     monkeypatch.setattr(k,'api',lambda _:client)
     assert k.main(['deploy',str(settings)])==0
     _,record=k.latest(settings)
     assert record['state']=='submitted' and record['version']==1
+    assert record['kernel'] == 'canonicaluser/smoke'
     assert k.main(['continue',str(settings)])==1
     assert len(calls)==1
 

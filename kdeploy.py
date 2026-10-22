@@ -13,6 +13,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 import yaml
@@ -280,7 +281,12 @@ def main(argv=None):
                     response = client.kernels_push(str(directory), acc=project['gpu'] or None)
                     if response.error or any(getattr(response, 'invalid_' + key, []) for key in ('dataset_sources', 'kernel_sources', 'competition_sources', 'model_sources')):
                         raise RuntimeError(response.error or 'Kaggle rejected one or more input sources')
-                    record.update(state='submitted', version=response.version_number, url=response.url)
+                    canonical = urlsplit(response.url).path.removeprefix('/code/').strip('/')
+                    if not re.fullmatch(r'[^/]+/[^/]+', canonical):
+                        canonical = getattr(response, 'ref', '')
+                    if not re.fullmatch(r'[^/]+/[^/]+', canonical):
+                        raise RuntimeError('Kaggle returned an invalid notebook identity')
+                    record.update(state='submitted', kernel=canonical, version=response.version_number, url=response.url)
                     write(directory / 'run.json', record)
                 print(json.dumps({'id': record['id'], 'kernel': record['kernel'], 'state': record['state'], 'prepared': str(directory)}, indent=2))
             return 0
