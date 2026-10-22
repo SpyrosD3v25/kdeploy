@@ -113,11 +113,12 @@ def test_snapshot_preserves_original_head_dirty_source_and_settings(project,tmp_
     assert not (work/'project/.git/config').read_text().find('remote "origin"') >= 0
 
 
-def test_continuation_restores_outputs_before_project_command(project,tmp_path):
+@pytest.mark.parametrize('mount', ['saved-version', 'notebooks/owner/saved-version'])
+def test_continuation_restores_outputs_before_project_command(project,tmp_path,mount):
     _,settings,config=project
     first,record=k.prepare(settings,config,'research')
     inputs=tmp_path/'input'
-    saved=inputs/'saved-version'
+    saved=inputs/mount
     saved.mkdir(parents=True)
     execute(first,saved,inputs)
     second,continued=k.prepare(settings,config,'research',record)

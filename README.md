@@ -27,7 +27,7 @@ kdeploy logs /absolute/path/to/project/settings.yaml
 kdeploy download /absolute/path/to/project/settings.yaml
 ```
 
-Use `--account research2` to select another profile. **Shard selection belongs to the project's settings YAML and its own program.** There is no `--shard` argument. For example, a project may read `shard: 2` itself; kdeploy passes that file unchanged and does not interpret it. Ripple's current CLI still needs its own settings-based shard selection before using this interface for its split runs.
+Use `--account research2` to select another profile. **Shard selection belongs to the project's settings YAML and its own program.** There is no `--shard` argument. For example, a project may read `shard: 2` itself; kdeploy passes that file unchanged and does not interpret it.
 
 Deploy prepares a private notebook containing tracked working-tree files and the selected settings, including uncommitted tracked edits. It preserves the original Git HEAD and index, without uploading Git credentials, remotes or history. Untracked dependencies and submodule contents require project setup; tracked symlinks are rejected. Keep large datasets outside Git and attach them through `datasets`. `--dry-run` creates inspectable local submission files without authenticating or contacting Kaggle.
 
