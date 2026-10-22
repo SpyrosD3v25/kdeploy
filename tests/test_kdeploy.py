@@ -54,11 +54,16 @@ def test_account_storage_and_no_overwrite(project, capsys):
 
 def test_accounts_are_isolated(project, monkeypatch):
     captured=[]
+    import kagglesdk.kaggle_http_client as http
+    monkeypatch.setattr(http, 'get_access_token_from_env', lambda: ('wrong-file-token', 'access_token'))
     class Client:
         def authenticate(self):
+            assert module.get_access_token_from_env() == (None, None)
+            assert http.get_access_token_from_env() == (None, None)
             captured.append(dict(os.environ))
     module: Any = types.ModuleType('kaggle.api.kaggle_api_extended')
     module.KaggleApi = Client
+    module.get_access_token_from_env = lambda: ('wrong-file-token', 'access_token')
     monkeypatch.setitem(sys.modules,'kaggle.api.kaggle_api_extended',module)
     monkeypatch.setenv('KAGGLE_API_TOKEN','wrong-global-token')
     k.api('research')

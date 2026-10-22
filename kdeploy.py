@@ -12,7 +12,9 @@ import sys
 import uuid
 import zipfile
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import requests
@@ -55,6 +57,11 @@ def api(profile):
         if key.startswith('KAGGLE_'):
             del os.environ[key]
     os.environ.update(KAGGLE_CONFIG_DIR=str(path.parent), KAGGLE_USERNAME=credentials['username'], KAGGLE_KEY=credentials['key'])
+    # Both CLI authentication and the SDK HTTP layer prefer ~/.kaggle/access_token.
+    # This process only uses explicitly selected legacy profiles; disable discovery.
+    for source in ('kagglesdk', 'kagglesdk.kaggle_http_client', 'kaggle.api.kaggle_api_extended'):
+        module: Any = import_module(source)
+        module.get_access_token_from_env = lambda: (None, None)
     from kaggle.api.kaggle_api_extended import KaggleApi
     client = KaggleApi()
     client.authenticate()
