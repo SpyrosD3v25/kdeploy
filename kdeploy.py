@@ -70,16 +70,23 @@ def api(profile):
 
 def project_for(settings):
     matches = [(path, yaml.safe_load(path.read_text())) for path in (CONFIG / 'projects').glob('*.yaml')]
-    matches = [(path, project) for path, project in matches if settings.is_relative_to(Path(project['root']))]
+    selected = yaml.safe_load(settings.read_text()).get('project')
+    matches = [(path, project) for path, project in matches
+               if (path.stem == selected if selected is not None else settings.is_relative_to(Path(project['root'])))]
     if not matches:
-        raise ValueError('settings must be inside a registered project; use kdeploy project add')
+        raise ValueError('no matching registered project; external settings require project: NAME')
     return max(matches, key=lambda pair: len(pair[1]['root']))
 
 
 def snapshot(root, settings):
     buffer = io.BytesIO()
     paths = {Path(p.decode()) for p in git(root, 'ls-files', '-z').split(b'\0') if p}
-    paths.add(settings.relative_to(root))
+    external = not settings.is_relative_to(root)
+    if external:
+        if Path('.kdeploy-settings.yaml') in paths or (root / '.kdeploy-settings.yaml').exists():
+            raise ValueError('reserved injected settings path already exists: .kdeploy-settings.yaml')
+    else:
+        paths.add(settings.relative_to(root))
     with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for relative in sorted(paths):
             if relative.parts[0] in ('.git', '.kdeploy'):
@@ -89,6 +96,8 @@ def snapshot(root, settings):
                 raise ValueError(f'tracked symlinks must be handled by project setup: {relative}')
             if path.is_file():
                 archive.write(path, str(relative))
+        if external:
+            archive.writestr('.kdeploy-settings.yaml', settings.read_bytes())
         archive.writestr('.kdeploy/head.commit', git(root, 'cat-file', 'commit', 'HEAD'))
         archive.writestr('.kdeploy/tree.pack', git(root, 'pack-objects', '--stdout', '--revs', data=b'HEAD^{tree}\n'))
     return buffer.getvalue()
@@ -99,7 +108,7 @@ def prepare(settings, project, profile, previous=None):
     _, credentials = account(profile)
     payload = snapshot(root, settings)
     identifier = datetime.now(UTC).strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
-    relative = str(settings.relative_to(root))
+    relative = str(settings.relative_to(root)) if settings.is_relative_to(root) else '.kdeploy-settings.yaml'
     slug = re.sub('[^a-z0-9]+', '-', project['name'].lower()).strip('-')[:30]
     record = {'id': identifier, 'project': project['name'], 'account': profile,
               'kernel': credentials['username'] + '/' + slug + '-' + identifier,
@@ -208,7 +217,7 @@ def main(argv=None):
             add.add_argument('--setup', default='')
     for kind in ('deploy', 'continue', 'status', 'logs', 'download'):
         command = commands.add_parser(kind)
-        command.add_argument('settings', type=Path, help='project-owned settings YAML; shard selection stays in this file')
+        command.add_argument('settings', type=Path, help='settings YAML; external files select a registered project with project: NAME')
         command.add_argument('--account', type=name)
         if kind in ('deploy', 'continue'):
             command.add_argument('--dry-run', action='store_true', help='prepare and inspect without contacting Kaggle')

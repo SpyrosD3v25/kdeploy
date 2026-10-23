@@ -253,3 +253,29 @@ def test_continue_rejects_changed_settings_before_network(project, monkeypatch):
     settings.write_text('{"shard": 3}\n')
     monkeypatch.setattr(k, 'api', lambda _: pytest.fail('changed settings contacted Kaggle'))
     assert k.main(['continue', str(settings)]) == 1
+
+
+def test_external_settings_are_injected_without_overwriting_defaults(project, tmp_path, monkeypatch):
+    root, general, config = project
+    original = general.read_bytes()
+    external = tmp_path / 'outside/settings.yaml'
+    external.parent.mkdir()
+    external.write_text('{"project":"example","shard":3}')
+    (external.parent / 'unrelated.txt').write_text('must not upload')
+    monkeypatch.setattr(k, 'api', lambda _: pytest.fail('offline preparation only'))
+    assert k.main(['deploy',str(external),'--dry-run']) == 0
+    directory = next((k.STATE/'runs').iterdir())
+    record = json.loads((directory/'run.json').read_text())
+    assert record['settings'] == str(external) and record['settings_relative'] == '.kdeploy-settings.yaml'
+    inputs = tmp_path/'input'
+    first = inputs/'notebooks/owner/first'
+    first.mkdir(parents=True)
+    execute(directory, first, inputs)
+    assert (first/'project/settings.yaml').read_bytes() == original == general.read_bytes()
+    assert not (first/'project/unrelated.txt').exists()
+    assert (first/'kdeploy-output/files/results/counter.txt').read_text() == '3'
+    second, _ = k.prepare(external, config, 'research', record)
+    work = tmp_path/'second'
+    work.mkdir()
+    execute(second, work, inputs)
+    assert (work/'kdeploy-output/files/results/counter.txt').read_text() == '6'
