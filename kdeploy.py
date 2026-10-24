@@ -78,9 +78,11 @@ def project_for(settings):
     return max(matches, key=lambda pair: len(pair[1]['root']))
 
 
-def snapshot(root, settings):
+def snapshot(root, settings, exclude=()):
     buffer = io.BytesIO()
     paths = {Path(p.decode()) for p in git(root, 'ls-files', '-z').split(b'\0') if p}
+    skipped = {p for p in paths if any(p.match(pattern) for pattern in exclude)}
+    paths -= skipped
     external = not settings.is_relative_to(root)
     if external:
         if Path('.kdeploy-settings.yaml') in paths or (root / '.kdeploy-settings.yaml').exists():
@@ -99,14 +101,22 @@ def snapshot(root, settings):
         if external:
             archive.writestr('.kdeploy-settings.yaml', settings.read_bytes())
         archive.writestr('.kdeploy/head.commit', git(root, 'cat-file', 'commit', 'HEAD'))
-        archive.writestr('.kdeploy/tree.pack', git(root, 'pack-objects', '--stdout', '--revs', data=b'HEAD^{tree}\n'))
+        objects = {git(root, 'rev-parse', 'HEAD^{tree}').strip()}
+        for entry in git(root, 'ls-tree', '-r', '-t', '-z', 'HEAD').split(b'\0'):
+            if entry:
+                header, filename = entry.split(b'\t', 1)
+                _, kind, identity = header.split()
+                if kind == b'tree' or Path(filename.decode()) not in skipped:
+                    objects.add(identity)
+        archive.writestr('.kdeploy/tree.pack', git(root, 'pack-objects', '--stdout', data=b'\n'.join(sorted(objects)) + b'\n'))
+        archive.writestr('.kdeploy/skipped', b'\0'.join(str(p).encode() for p in sorted(skipped)) + (b'\0' if skipped else b''))
     return buffer.getvalue()
 
 
 def prepare(settings, project, profile, previous=None):
     root = Path(project['root'])
     _, credentials = account(profile)
-    payload = snapshot(root, settings)
+    payload = snapshot(root, settings, project.get('exclude', []))
     identifier = datetime.now(UTC).strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
     relative = str(settings.relative_to(root)) if settings.is_relative_to(root) else '.kdeploy-settings.yaml'
     slug = re.sub('[^a-z0-9]+', '-', project['name'].lower()).strip('-')[:30]

@@ -60,6 +60,9 @@ def run(bundle, record, project, work=Path('/kaggle/working'), inputs=Path('/kag
     subprocess.run(['git', '-C', str(source), 'update-ref', 'HEAD', record['git_commit']], check=True)
     (source / '.git/shallow').write_text(record['git_commit'] + '\n')
     subprocess.run(['git', '-C', str(source), 'read-tree', 'HEAD'], check=True)
+    skipped = (source / '.kdeploy/skipped').read_bytes()
+    if skipped:
+        subprocess.run(['git', '-C', str(source), 'update-index', '--skip-worktree', '-z', '--stdin'], input=skipped, check=True)
     shutil.rmtree(source / '.kdeploy')
     settings = inside(source, record['settings_relative'])
     if sha(settings) != record['settings_sha256']:

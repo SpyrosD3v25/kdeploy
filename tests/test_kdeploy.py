@@ -279,3 +279,23 @@ def test_external_settings_are_injected_without_overwriting_defaults(project, tm
     work.mkdir()
     execute(second, work, inputs)
     assert (work/'kdeploy-output/files/results/counter.txt').read_text() == '6'
+
+
+def test_excluded_documents_keep_original_git_identity(project, tmp_path):
+    root, settings, config = project
+    notes = root / 'notes'
+    notes.mkdir()
+    (notes / 'report.pdf').write_bytes(os.urandom(1100000))
+    subprocess.run(['git', '-C', str(root), 'add', 'notes/report.pdf'], check=True)
+    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture documentation'], check=True)
+    config['exclude'] = ['notes/*.pdf']
+    directory, record = k.prepare(settings, config, 'research')
+    assert (directory / 'kernel.ipynb').stat().st_size < 100000
+    work = tmp_path / 'work'
+    work.mkdir()
+    execute(directory, work, tmp_path / 'inputs')
+    assert not (work / 'project/notes/report.pdf').exists()
+    assert k.git(work / 'project', 'rev-parse', 'HEAD').decode().strip() == record['git_commit']
+    assert k.git(work / 'project', 'diff', 'HEAD') == b''
+    assert k.git(work / 'project', 'status', '--porcelain') == b''
