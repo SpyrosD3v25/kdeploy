@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 
@@ -35,6 +36,7 @@ def restore(previous, target):
 
 
 def run(bundle, record, project, work=Path('/kaggle/working'), inputs=Path('/kaggle/input')):
+    started = time.time()
     payload = base64.b64decode(bundle)
     if hashlib.sha256(payload).hexdigest() != record['source_sha256']:
         raise ValueError('source snapshot hash mismatch')
@@ -77,7 +79,7 @@ def run(bundle, record, project, work=Path('/kaggle/working'), inputs=Path('/kag
         path.parent.mkdir(parents=True, exist_ok=True)
         path.symlink_to(target, target_is_directory=True)
     env = {**os.environ, **{key: value.replace('{settings}', str(settings)) for key, value in project['env'].items()},
-           'KDEPLOY_SETTINGS': str(settings),
+           'KDEPLOY_SETTINGS': str(settings), 'KDEPLOY_STARTED_AT': str(started),
            'PYTHONUNBUFFERED': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
     code = 1
     try:
