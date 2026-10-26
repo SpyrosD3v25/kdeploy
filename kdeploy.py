@@ -1,5 +1,6 @@
 """Deploy Git projects to Kaggle using named accounts and project-owned settings."""
 import argparse
+import ast
 import base64
 import fcntl
 import hashlib
@@ -116,15 +117,23 @@ def snapshot(root, settings, exclude=()):
 def prepare(settings, project, profile, previous=None):
     root = Path(project['root'])
     _, credentials = account(profile)
-    payload = snapshot(root, settings, project.get('exclude', []))
+    if previous:
+        notebook = json.loads((STATE / 'runs' / previous['id'] / 'kernel.ipynb').read_text())
+        invocation = ast.parse(notebook['cells'][0]['source']).body[-1].value
+        payload = base64.b64decode(ast.literal_eval(invocation.args[0]), validate=True)
+        if hashlib.sha256(payload).hexdigest() != previous['source_sha256']:
+            raise ValueError('saved source snapshot hash mismatch')
+        project = previous['configuration']
+    else:
+        payload = snapshot(root, settings, project.get('exclude', []))
     identifier = datetime.now(UTC).strftime('%Y%m%d-%H%M%S-') + uuid.uuid4().hex[:8]
-    relative = str(settings.relative_to(root)) if settings.is_relative_to(root) else '.kdeploy-settings.yaml'
+    relative = previous['settings_relative'] if previous else str(settings.relative_to(root)) if settings.is_relative_to(root) else '.kdeploy-settings.yaml'
     slug = re.sub('[^a-z0-9]+', '-', project['name'].lower()).strip('-')[:30]
     record = {'id': identifier, 'project': project['name'], 'account': profile,
               'kernel': credentials['username'] + '/' + slug + '-' + identifier,
               'settings': str(settings), 'settings_relative': relative, 'settings_sha256': sha(settings),
-              'git_commit': git(root, 'rev-parse', 'HEAD').decode().strip(),
-              'git_status': git(root, 'status', '--porcelain').decode(),
+              'git_commit': previous['git_commit'] if previous else git(root, 'rev-parse', 'HEAD').decode().strip(),
+              'git_status': previous['git_status'] if previous else git(root, 'status', '--porcelain').decode(),
               'source_sha256': hashlib.sha256(payload).hexdigest(), 'configuration': project,
               'previous': {key: previous[key] for key in ('id', 'kernel')} if previous else None}
     directory = STATE / 'runs' / identifier

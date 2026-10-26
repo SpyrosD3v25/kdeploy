@@ -299,3 +299,21 @@ def test_excluded_documents_keep_original_git_identity(project, tmp_path):
     assert k.git(work / 'project', 'rev-parse', 'HEAD').decode().strip() == record['git_commit']
     assert k.git(work / 'project', 'diff', 'HEAD') == b''
     assert k.git(work / 'project', 'status', '--porcelain') == b''
+
+
+def test_continue_reuses_source_snapshot_after_local_edits(project, tmp_path):
+    root, settings, config = project
+    first, original = k.prepare(settings, config, 'research')
+    inputs = tmp_path / 'inputs'
+    saved = inputs / 'notebooks/owner/first'
+    saved.mkdir(parents=True)
+    execute(first, saved, inputs)
+    (root / 'train.py').write_text('raise AssertionError("new local code must not run")\n')
+    second, continued = k.prepare(settings, {**config, 'command': 'false'}, 'research', original)
+    assert continued['source_sha256'] == original['source_sha256']
+    assert continued['git_commit'] == original['git_commit']
+    assert continued['configuration'] == original['configuration']
+    work = tmp_path / 'continued'
+    work.mkdir()
+    execute(second, work, inputs)
+    assert (work / 'kdeploy-output/files/results/counter.txt').read_text() == '4'
