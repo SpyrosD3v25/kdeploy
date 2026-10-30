@@ -7,7 +7,7 @@ name = "kdeploy"
 version = "0.1.0"
 description = "Small, project-independent Kaggle deployment CLI"
 requires-python = ">=3.11"
-dependencies = ["kaggle==2.1.0", "PyYAML>=6", "requests>=2.31"]
+dependencies = ["kaggle>=2.2.1,<3", "PyYAML>=6", "requests>=2.31"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.14", "mypy>=1.18", "types-PyYAML"]
@@ -16,7 +16,11 @@ dev = ["pytest>=8", "ruff>=0.14", "mypy>=1.18", "types-PyYAML"]
 kdeploy = "kdeploy:main"
 
 [tool.setuptools]
-py-modules = ["kdeploy", "remote"]
+package-dir = {"" = "src"}
+py-modules = ["kdeploy", "remote", "database", "kaggle_client"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 120

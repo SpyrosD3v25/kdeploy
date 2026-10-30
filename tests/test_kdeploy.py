@@ -174,7 +174,9 @@ def test_download_paginates_all_output_files(monkeypatch):
     class Context:
         def __enter__(self): return service
         def __exit__(self,*args): pass
-    assert len(k.outputs(SimpleNamespace(build_kaggle_client=Context),'owner/kernel'))==2
+    client = k.KaggleClient.__new__(k.KaggleClient)
+    client.client = SimpleNamespace(build_kaggle_client=Context)
+    assert len(client.outputs('owner/kernel'))==2
     assert tokens==['','next']
 
 
@@ -201,8 +203,9 @@ def test_submit_and_reject_continuation_of_active_job(project,monkeypatch):
     def push(path, **kwargs):
         calls.append(path)
         return SimpleNamespace(error='', version_number=1, ref='smoke', url='https://www.kaggle.com/code/canonicaluser/smoke')
-    client=SimpleNamespace(kernels_push=push,
-                           kernels_status=lambda kernel:SimpleNamespace(status='RUNNING'))
+    client=SimpleNamespace(submit=lambda path, accelerator: push(path, acc=accelerator),
+                           check_quota=lambda *args: None,
+                           status=lambda kernel:SimpleNamespace(status='RUNNING'))
     monkeypatch.setattr(k,'api',lambda _:client)
     assert k.main(['deploy',str(settings)])==0
     _,record=k.latest(settings)
@@ -220,7 +223,6 @@ def test_download_checks_remote_identity_and_preserves_tree(project, tmp_path, m
     saved.mkdir()
     execute(directory, saved, tmp_path / 'inputs')
     urls = {str(path.relative_to(saved)): str(path) for path in saved.rglob('*') if path.is_file()}
-    monkeypatch.setattr(k, 'outputs', lambda *args: urls)
     def fetch(url, target, expected=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(url, target)
@@ -228,10 +230,11 @@ def test_download_checks_remote_identity_and_preserves_tree(project, tmp_path, m
             assert k.sha(target) == expected
     monkeypatch.setattr(k, 'fetch', fetch)
     target = tmp_path / 'download'
-    k.download(None, record, target)
+    client = SimpleNamespace(outputs=lambda kernel: urls)
+    k.download(client, record, target)
     assert (target / 'files/results/counter.txt').read_text() == '2'
     with pytest.raises(ValueError, match='does not match'):
-        k.download(None, {**record, 'id': 'wrong-run'}, tmp_path / 'other-download')
+        k.download(client, {**record, 'id': 'wrong-run'}, tmp_path / 'other-download')
 
 
 def test_settings_select_the_job_without_a_shard_flag(project, monkeypatch):
@@ -317,3 +320,30 @@ def test_continue_reuses_source_snapshot_after_local_edits(project, tmp_path):
     work.mkdir()
     execute(second, work, inputs)
     assert (work / 'kdeploy-output/files/results/counter.txt').read_text() == '4'
+
+
+def test_hydrate_and_round_robin(project, tmp_path, monkeypatch):
+    import database
+    root = tmp_path / 'Downloads/kdeploy'
+    for folder, name in (('first-folder', 'alpha'), ('second-folder', 'beta')):
+        path = root / folder / 'kaggle.json'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'username': name, 'key': 'secret'}))
+    monkeypatch.setattr(k.Path, 'home', lambda: tmp_path)
+    assert k.main(['hydrate', 'accs']) == 0
+    with database.connect(k.STATE) as db:
+        assert k.select_account(db, dry_run=True) == 'alpha'
+        database.create_run(db, 'test-run', 'alpha', str(project[0]))
+        database.set_status(db, 'test-run', 'successful')
+        assert k.select_account(db, dry_run=True) == 'beta'
+    assert k.account('alpha')[0] == root / 'first-folder/kaggle.json'
+
+
+def test_quota_exhaustion_stops_submission(project, monkeypatch, capsys):
+    from datetime import timedelta
+    quota = SimpleNamespace(time_used=timedelta(hours=30), total_time_allowed=timedelta(hours=30))
+    client = k.KaggleClient.__new__(k.KaggleClient)
+    client.client = SimpleNamespace(quota_view=lambda: SimpleNamespace(gpu_quota=quota))
+    monkeypatch.setattr(k, 'api', lambda _: client)
+    assert k.main(['deploy', str(project[1])]) == 1
+    assert 'no accelerator hours remaining' in capsys.readouterr().err

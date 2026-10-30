@@ -8,19 +8,20 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import uuid
 import zipfile
 from datetime import UTC, datetime
-from importlib import import_module
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 import requests
 import yaml
 
+import database
+from kaggle_client import KaggleClient
 from remote import inside, sha
 
 CONFIG = Path(os.getenv('XDG_CONFIG_HOME', Path.home() / '.config')) / 'kdeploy'
@@ -45,28 +46,81 @@ def git(root, *args, data=None):
 
 
 def account(profile):
-    path = CONFIG / 'accounts' / name(profile) / 'kaggle.json'
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', profile):
+        raise ValueError('invalid account name')
+    with database.connect(STATE) as db:
+        row = db.execute('SELECT credentials_path FROM accounts WHERE name = ?', (profile,)).fetchone()
+    path = Path(row[0]) if row else CONFIG / 'accounts' / profile / 'kaggle.json'
     if not path.is_file():
-        raise ValueError(f'unknown account: {profile}; use kdeploy account add')
+        raise ValueError(f'unknown account: {profile}; use kdeploy hydrate accs')
     return path, json.loads(path.read_text())
+
+
+def hydrate():
+    root = Path.home() / 'Downloads' / 'kdeploy'
+    if not root.is_dir():
+        raise ValueError(f'account directory does not exist: {root}')
+    found = {}
+    for path in sorted(root.glob('*/kaggle.json')):
+        credentials = json.loads(path.read_text())
+        if not all(isinstance(credentials.get(key), str) and credentials[key] for key in ('username', 'key')):
+            raise ValueError(f'invalid credentials in {path}')
+        profile = credentials['username']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', profile):
+            raise ValueError(f'invalid Kaggle username in {path}')
+        if profile in found:
+            raise ValueError(f'duplicate credentials for Kaggle username {profile}')
+        found[profile] = path.resolve()
+    with database.connect(STATE) as db:
+        for profile, path in found.items():
+            db.execute('''INSERT INTO accounts(name, credentials_path) VALUES (?, ?)
+                          ON CONFLICT(name) DO UPDATE SET credentials_path = excluded.credentials_path''',
+                       (profile, str(path)))
+    print(f'Hydrated {len(found)} account(s) from {root}')
+
+
+def refresh_account(db, profile):
+    rows = db.execute("SELECT s.run_id FROM status s JOIN accounts a ON a.id = s.acc WHERE a.name = ? AND s.status IN ('running', 'not_started')", (profile,)).fetchall()
+    for (run_id,) in rows:
+        path = STATE / 'runs' / run_id / 'run.json'
+        if not path.exists():
+            raise ValueError(f'account {profile} has an unfinished run {run_id} without a local record')
+        record = json.loads(path.read_text())
+        if record.get('state') not in ('submitted', 'submitting'):
+            raise ValueError(f'account {profile} has an unfinished run {run_id}; inspect its local record')
+        result = str(api(profile).status(record['kernel']).status).lower()
+        state = kaggle_status(result)
+        if state == 'running':
+            raise ValueError(f'account {profile} has a running or unresolved run: {run_id} ({result})')
+        database.set_status(db, run_id, state)
+
+
+def kaggle_status(result):
+    result = str(result).lower()
+    if any(word in result for word in ('complete', 'success')):
+        return 'successful'
+    if any(word in result for word in ('error', 'fail', 'cancel')) and 'cancel_requested' not in result:
+        return 'failed'
+    return 'running'
+
+
+def select_account(db, requested=None, dry_run=False, accelerator=None):
+    rows = db.execute('''SELECT a.name, MAX(s.updated_at) AS last_used FROM accounts a
+                         LEFT JOIN status s ON s.acc = a.id GROUP BY a.id
+                         ORDER BY last_used IS NOT NULL, last_used, a.name''').fetchall()
+    candidates = [row[0] for row in rows if not requested or row[0] == requested]
+    if not candidates:
+        raise ValueError('no matching accounts; use kdeploy hydrate accs')
+    if not dry_run:
+        refresh_account(db, candidates[0])
+        if accelerator:
+            api(candidates[0]).check_quota(candidates[0], accelerator)
+    return candidates[0]
 
 
 def api(profile):
     path, credentials = account(profile)
-    # A global token must never override the explicitly selected account.
-    for key in list(os.environ):
-        if key.startswith('KAGGLE_'):
-            del os.environ[key]
-    os.environ.update(KAGGLE_CONFIG_DIR=str(path.parent), KAGGLE_USERNAME=credentials['username'], KAGGLE_KEY=credentials['key'])
-    # Both CLI authentication and the SDK HTTP layer prefer ~/.kaggle/access_token.
-    # This process only uses explicitly selected legacy profiles; disable discovery.
-    for source in ('kagglesdk', 'kagglesdk.kaggle_http_client', 'kaggle.api.kaggle_api_extended'):
-        module: Any = import_module(source)
-        module.get_access_token_from_env = lambda: (None, None)
-    from kaggle.api.kaggle_api_extended import KaggleApi
-    client = KaggleApi()
-    client.authenticate()
-    return client
+    return KaggleClient(path, credentials)
 
 
 def project_for(settings):
@@ -164,27 +218,6 @@ def latest(settings, profile=None, identifier=None):
     raise ValueError('no submitted run found for these settings/account')
 
 
-def outputs(client, kernel):
-    from kagglesdk.kernels.types.kernels_api_service import ApiListKernelSessionOutputRequest
-    owner, slug = kernel.split('/')
-    request = ApiListKernelSessionOutputRequest()
-    request.user_name, request.kernel_slug, request.page_size = owner, slug, 200
-    files = {}
-    seen = set()
-    with client.build_kaggle_client() as service:
-        while True:
-            response = service.kernels.kernels_api_client.list_kernel_session_output(request)
-            files.update({item.file_name: item.url for item in response.files or []})
-            token = response.next_page_token
-            if not token:
-                break
-            if token in seen:
-                raise RuntimeError('Kaggle repeated an output page token')
-            seen.add(token)
-            request.page_token = token
-    return files
-
-
 def fetch(url, target, expected=None):
     if expected and target.is_file() and sha(target) == expected:
         return
@@ -201,7 +234,7 @@ def fetch(url, target, expected=None):
 
 
 def download(client, record, target):
-    urls = outputs(client, record['kernel'])
+    urls = client.outputs(record['kernel'])
     if not {'kdeploy-output/run.json', 'kdeploy-output/manifest.json'} <= urls.keys():
         raise ValueError('saved output is not ready; check the run status')
     for filename in ('run.json', 'manifest.json'):
@@ -222,6 +255,8 @@ def download(client, record, target):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='kdeploy', description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    hydrate_parser = commands.add_parser('hydrate')
+    hydrate_parser.add_argument('kind', choices=['accs'])
     for kind in ('account', 'project'):
         group = commands.add_parser(kind).add_subparsers(dest='action', required=True)
         group.add_parser('list')
@@ -231,13 +266,13 @@ def main(argv=None):
             add.add_argument('--credentials', type=Path, required=True, help='existing legacy Kaggle JSON key')
         else:
             add.add_argument('path', type=Path)
-            add.add_argument('--account', type=name, required=True)
+            add.add_argument('--account', type=name, help=argparse.SUPPRESS)
             add.add_argument('--command', default='python train.py --settings {settings}', dest='entry')
             add.add_argument('--setup', default='')
     for kind in ('deploy', 'continue', 'status', 'logs', 'download'):
         command = commands.add_parser(kind)
         command.add_argument('settings', type=Path, help='settings YAML; external files select a registered project with project: NAME')
-        command.add_argument('--account', type=name)
+        command.add_argument('--account')
         if kind in ('deploy', 'continue'):
             command.add_argument('--dry-run', action='store_true', help='prepare and inspect without contacting Kaggle')
         else:
@@ -246,9 +281,19 @@ def main(argv=None):
             command.add_argument('--to', type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == 'hydrate':
+            hydrate()
+            return 0
         if args.command in ('account', 'project'):
             folder = CONFIG / (args.command + 's')
             if args.action == 'list':
+                if args.command == 'account':
+                    with database.connect(STATE) as db:
+                        names = {row[0] for row in db.execute('SELECT name FROM accounts')}
+                    names.update(path.parent.name for path in folder.glob('*/kaggle.json'))
+                    for profile in sorted(names):
+                        print(profile)
+                    return 0
                 for path in sorted(folder.glob('*/kaggle.json' if args.command == 'account' else '*.yaml')):
                     print(path.parent.name if args.command == 'account' else path.stem)
                 return 0
@@ -264,12 +309,13 @@ def main(argv=None):
                 descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, 'w') as stream:
                     json.dump({key: credentials[key] for key in ('username', 'key')}, stream)
+                with database.connect(STATE) as db:
+                    database.upsert_account(db, args.name, path)
             else:
-                account(args.account)
                 root = args.path.expanduser().resolve()
                 if git(root, 'rev-parse', '--show-toplevel').decode().strip() != str(root):
                     raise ValueError('register the Git repository root')
-                project = {'name': args.name, 'root': str(root), 'account': args.account, 'command': args.entry,
+                project = {'name': args.name, 'root': str(root), 'command': args.entry,
                            'setup': args.setup, 'outputs': ['results'], 'env': {}, 'datasets': [], 'kernels': [], 'gpu': 'NvidiaTeslaT4'}
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(yaml.safe_dump(project, sort_keys=False))
@@ -289,32 +335,48 @@ def main(argv=None):
                 raise ValueError('output directories must be separate, non-root paths')
         if not all(isinstance(value, str) for value in project['env'].values()):
             raise ValueError('project environment values must be strings')
-        profile = args.account or project['account']
-        account(profile)
         if args.command in ('deploy', 'continue'):
             lock_path = STATE / 'deploy.lock'
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open('w') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                previous = latest(settings, profile)[1] if args.command == 'continue' else None
+                previous = latest(settings, args.account)[1] if args.command == 'continue' else None
                 if previous and previous['settings_sha256'] != sha(settings):
                     raise ValueError('settings changed since the previous run; use deploy for a new configuration')
+                with database.connect(STATE) as db:
+                    # Import existing local profiles without requiring users to register them again.
+                    for path in (CONFIG / 'accounts').glob('*/kaggle.json'):
+                        if not db.execute('SELECT 1 FROM accounts WHERE name = ?', (path.parent.name,)).fetchone():
+                            database.upsert_account(db, path.parent.name, path)
+                    for path in (STATE / 'runs').glob('*/run.json'):
+                        old = json.loads(path.read_text())
+                        if old.get('state') in ('submitted', 'submitting'):
+                            stamp = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+                            db.execute('''INSERT OR IGNORE INTO status(run_id, status, acc, project_path, created_at, updated_at)
+                                          SELECT ?, 'running', id, ?, ?, ? FROM accounts WHERE name = ?''',
+                                       (old['id'], old['configuration']['root'], stamp, stamp, old['account']))
+                    db.commit()
+                    profile = select_account(db, args.account or (previous['account'] if previous else None), args.dry_run, project['gpu'])
                 directory, record = prepare(settings, project, profile, previous)
                 if not args.dry_run:
                     client = api(profile)
                     if previous:
-                        status = str(client.kernels_status(previous['kernel']).status).lower()
+                        status = str(client.status(previous['kernel']).status).lower()
                         if any(word in status for word in ('running', 'queued', 'cancel_requested', 'new_script')):
                             raise ValueError('previous run is still active; use status or logs')
                         # Verify that the saved output actually exists before starting a GPU session.
-                        available = outputs(client, previous['kernel'])
+                        available = client.outputs(previous['kernel'])
                         if 'kdeploy-output/manifest.json' not in available:
                             raise ValueError('previous run has no finalized saved artifacts')
                     record['state'] = 'submitting'
                     write(directory / 'run.json', record)
+                    with database.connect(STATE) as db:
+                        database.create_run(db, record['id'], profile, project['root'])
                     print('submitting', record['id'], record['kernel'], flush=True)
-                    response = client.kernels_push(str(directory), acc=project['gpu'] or None)
+                    response = client.submit(directory, project['gpu'])
                     if response.error or any(getattr(response, 'invalid_' + key, []) for key in ('dataset_sources', 'kernel_sources', 'competition_sources', 'model_sources')):
+                        with database.connect(STATE) as db:
+                            database.set_status(db, record['id'], 'failed')
                         raise RuntimeError(response.error or 'Kaggle rejected one or more input sources')
                     canonical = urlsplit(response.url).path.removeprefix('/code/').strip('/')
                     if not re.fullmatch(r'[^/]+/[^/]+', canonical):
@@ -323,19 +385,23 @@ def main(argv=None):
                         raise RuntimeError('Kaggle returned an invalid notebook identity')
                     record.update(state='submitted', kernel=canonical, version=response.version_number, url=response.url)
                     write(directory / 'run.json', record)
+                    with database.connect(STATE) as db:
+                        database.set_status(db, record['id'], 'running')
                 print(json.dumps({'id': record['id'], 'kernel': record['kernel'], 'state': record['state'], 'prepared': str(directory)}, indent=2))
             return 0
         directory, record = latest(settings, args.account, args.run)
         client = api(record['account'])
         if args.command == 'status':
-            response = client.kernels_status(record['kernel'])
+            response = client.status(record['kernel'])
+            with database.connect(STATE) as db:
+                database.set_status(db, record['id'], kaggle_status(response.status))
             print(record['id'], record['kernel'], str(response.status), response.failure_message)
         elif args.command == 'logs':
-            print(client.kernels_logs(record['kernel']), end='')
+            print(client.logs(record['kernel']), end='')
         else:
             download(client, record, args.to.expanduser().resolve() if args.to else directory / 'output')
         return 0
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError, requests.RequestException, yaml.YAMLError) as error:
+    except (OSError, ValueError, KeyError, RuntimeError, sqlite3.Error, subprocess.CalledProcessError, requests.RequestException, yaml.YAMLError) as error:
         print(f'kdeploy: {error}', file=sys.stderr)
         return 1
 
