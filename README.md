@@ -1,8 +1,36 @@
+<div align="center">
+
 # kdeploy
 
-Deploy a Git project to Kaggle from your terminal. Automatic account selection, source snapshots, saved outputs and continuation; no project-specific training logic.
+**Your Git project, running on Kaggle.**
 
-## 1. Register an account and project
+Deploy from your terminal · Track your runs · Continue from saved artifacts
+
+[Get started](#get-started) · [Deploy](#2-deploy-using-a-settings-file) · [Continue](#3-continue-after-a-session) · [Development](#development)
+
+</div>
+
+---
+
+kdeploy packages your project into a private Kaggle notebook, chooses an account, and helps you follow the run and retrieve its outputs. Your project stays in control of its settings, training, and checkpoints.
+
+```text
+Git project + settings  →  deploy  →  Kaggle notebook
+                                          ↓
+                                 status · logs · outputs
+                                          ↓
+                                  download / continue
+```
+
+## Get started
+
+You need Python 3.11+, Git, Bash, and a Kaggle account with a legacy JSON API key. Install from this repository:
+
+```bash
+python -m pip install -e .
+```
+
+### 1. Register accounts and a project
 
 ```bash
 mkdir -p ~/Downloads/kdeploy/research1
@@ -17,11 +45,13 @@ kdeploy project list
 
 `hydrate accs` registers the existing **legacy Kaggle JSON API keys** in `~/Downloads/kdeploy/<folder>/kaggle.json`; it uses the `username` inside each key as the account name, regardless of the folder name. It does not create Kaggle accounts or copy the keys. Run it again after adding accounts. Account-specific authentication overrides global Kaggle environment variables and access-token files. Existing `account add` profiles remain supported.
 
+> Earlier versions of hydration registered folder names. Those entries can remain alongside username-based entries; reconcile them before relying on account rotation.
+
 Projects do not have a default account. Deploy selects the account whose latest run status was updated least recently, with unused accounts first. The selected account is checked for an active kdeploy run and, for accelerator jobs, remaining Kaggle quota. If it is busy, out of hours, or its quota cannot be checked, deployment exits with a message. Override selection with `--account NAME`. Dry runs do not contact Kaggle or change rotation. Run statuses and accounts are stored in `~/.local/state/kdeploy/kdeploy.sqlite3`; submitted runs from the previous file-based format are imported when deploying. Statuses are refreshed on `status` or when an account is selected, not by a background service.
 
 `project add` prints the configuration path under `~/.config/kdeploy/projects/`. Edit that YAML to set `command`, `setup`, `outputs` (directories, default `[results]`), `env`, `datasets`, `kernels` and `gpu` (default `NvidiaTeslaT4`; null for CPU). Nothing is written into the registered project. Setup and command run in separate shells; persistent environment values belong in `env`. `{settings}` works in commands and environment values; the launcher also sets `KDEPLOY_SETTINGS`.
 
-## 2. Deploy using a settings file
+### 2. Deploy using a settings file
 
 ```bash
 kdeploy deploy /absolute/path/to/project/settings.yaml --dry-run
@@ -37,7 +67,7 @@ Deploy prepares a private notebook containing tracked working-tree files and the
 
 Every deployment gets a distinct Kaggle notebook, preventing subsequent deployments from replacing its output version. Local run records include source/settings hashes, Git identity, project configuration, account, notebook and returned version. They live under `~/.local/state/kdeploy/runs/`. Status/logs/download accept `--run RUN_ID`; otherwise they select the latest matching run. Download preserves artifact paths, verifies SHA256 and skips files already verified. Add `--to /path` to select its destination.
 
-## 3. Continue after a session
+### 3. Continue after a session
 
 ```bash
 kdeploy continue /absolute/path/to/project/settings.yaml
@@ -49,4 +79,29 @@ Output directories point directly into `/kaggle/working/kdeploy-output/files/`; 
 
 This implementation uses the [official Kaggle API](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md) and [notebook metadata](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels_metadata.md). The installed SDK's output method omits pagination/version handling; kdeploy paginates the SDK endpoint directly and uses distinct notebooks plus run/hash verification. Private Kaggle smoke tests verified authentication, upload, execution, artifact finalization and hash-checked download. Two private GPU smoke sessions on the selected `spyrosx` account confirmed dual Tesla T4 allocation, CUDA execution, checkpoint save/load, exact CPU/CUDA RNG continuation on a fresh session, and verified downloads. Earlier CPU-only runs used an unintended global-token account; account discovery is now isolated, with a regression check for both authentication layers. Local tests cover continuation with a file-writing fixture; no model training has run.
 
-Python 3.11+, Git and Bash are required. Dependencies are in `pyproject.toml`; `pip install -e '.[dev]'` also installs the development checks. Run `ruff check .`, `mypy .` and `python -m pytest`. The local `bin/kdeploy` launcher uses this machine's existing Python; it is added to Bash PATH.
+## Command reference
+
+| Command | Purpose |
+| --- | --- |
+| `kdeploy hydrate accs` | Find account keys under `~/Downloads/kdeploy/` |
+| `kdeploy account list` | List account names |
+| `kdeploy project add NAME PATH` | Register a Git project |
+| `kdeploy project list` | List registered projects |
+| `kdeploy deploy SETTINGS` | Submit a run; supports `--account` and `--dry-run` |
+| `kdeploy continue SETTINGS` | Continue from saved outputs |
+| `kdeploy status SETTINGS` | Check a run's status |
+| `kdeploy logs SETTINGS` | Read a run's logs |
+| `kdeploy download SETTINGS` | Download verified outputs; supports `--to PATH` |
+
+Run `kdeploy --help` or `kdeploy COMMAND --help` for more options.
+
+## Development
+
+```bash
+python -m pip install -e '.[dev]'
+ruff check .
+mypy .
+python -m pytest
+```
+
+The declared dependencies include Kaggle 2.2.1 or newer for accelerator quota checks. Account activity checks cover kdeploy-tracked runs, not notebooks started elsewhere.
