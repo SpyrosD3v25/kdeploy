@@ -347,3 +347,107 @@ def test_quota_exhaustion_stops_submission(project, monkeypatch, capsys):
     monkeypatch.setattr(k, 'api', lambda _: client)
     assert k.main(['deploy', str(project[1])]) == 1
     assert 'no accelerator hours remaining' in capsys.readouterr().err
+
+
+def test_secrets_yaml_attaches_private_dataset_without_entering_notebook(project, tmp_path, monkeypatch):
+    root, settings, config = project
+    secret = 'fixture-value-never-print'
+    (root / k.SECRETS_FILE).write_text('HF_TOKEN: ' + secret + '\nOTHER_KEY: another\n')
+    (root / 'train.py').write_text("import os\nfrom pathlib import Path\np=Path('results/seen.txt');p.parent.mkdir(exist_ok=True);p.write_text('yes' if os.getenv('HF_TOKEN') else 'no')\n")
+    directory, record = k.prepare(settings, config, 'research')
+    ref = 'fixtureuser/kdeploy-example-secrets'
+    metadata = json.loads((directory / 'kernel-metadata.json').read_text())
+    assert metadata['dataset_sources'] == [ref]
+    assert record['secrets_dataset'] == ref
+    for name in ('kernel.ipynb', 'kernel-metadata.json', 'run.json'):
+        assert secret not in (directory / name).read_text()
+    inputs = tmp_path / 'inputs' / 'kdeploy-example-secrets'
+    inputs.mkdir(parents=True)
+    (inputs / 'secrets.yaml').write_text(json.dumps({'HF_TOKEN': secret, 'OTHER_KEY': 'another'}))
+    work = tmp_path / 'work'
+    work.mkdir()
+    execute(directory, work, inputs.parent)
+    assert (work / 'kdeploy-output/files/results/seen.txt').read_text() == 'yes'
+    assert secret not in (work / 'kdeploy-output/run.log').read_text()
+
+
+def test_secrets_yaml_rejects_tracked_and_nonstring_values(project):
+    root, settings, config = project
+    path = root / k.SECRETS_FILE
+    path.write_text('HF_TOKEN: 123\n')
+    with pytest.raises(ValueError, match='string mapping'):
+        k.prepare(settings, config, 'research')
+    path.write_text('HF_TOKEN: fixture-value\n')
+    subprocess.run(['git', '-C', str(root), 'add', str(path)], check=True)
+    with pytest.raises(ValueError, match='must not be tracked'):
+        k.prepare(settings, config, 'research')
+
+
+def test_continuation_requires_secrets_yaml_when_original_used_it(project):
+    root, settings, config = project
+    path = root / k.SECRETS_FILE
+    path.write_text('HF_TOKEN: fixture-value\n')
+    _, original = k.prepare(settings, config, 'research')
+    path.unlink()
+    with pytest.raises(ValueError, match='continuation requires'):
+        k.prepare(settings, config, 'research', original)
+
+
+def test_private_secrets_dataset_upload_skips_unchanged_values(tmp_path):
+    from kaggle_client import KaggleClient
+    ref = 'fixtureuser/kdeploy-example-secrets'
+    calls = []
+    dataset = None
+
+    def list_datasets(**kwargs):
+        return [dataset] if dataset else []
+
+    def create(folder, **kwargs):
+        nonlocal dataset
+        calls.append(('create', kwargs))
+        assert kwargs['public'] is False
+        assert json.loads((k.Path(folder) / 'secrets.yaml').read_text()) == {'HF_TOKEN': 'fixture-value'}
+        dataset = SimpleNamespace(ref=ref, is_private=True, current_version_number=1)
+        return SimpleNamespace(error='')
+
+    def version(folder, *args, **kwargs):
+        nonlocal dataset
+        calls.append(('version', kwargs))
+        dataset = SimpleNamespace(ref=ref, is_private=True, current_version_number=2)
+        return SimpleNamespace(error='')
+
+    client = KaggleClient.__new__(KaggleClient)
+    client.client = SimpleNamespace(dataset_list=list_datasets, dataset_create_new=create,
+                                    dataset_create_version=version, dataset_status=lambda _: 'complete')
+    state = tmp_path / 'state.json'
+    client.publish_secrets(ref, {'HF_TOKEN': 'fixture-value'}, state)
+    client.publish_secrets(ref, {'HF_TOKEN': 'fixture-value'}, state)
+    assert [call[0] for call in calls] == ['create']
+    client.publish_secrets(ref, {'HF_TOKEN': 'changed-value'}, state)
+    assert [call[0] for call in calls] == ['create', 'version']
+    assert 'fixture-value' not in state.read_text()
+    dataset = SimpleNamespace(ref=ref, is_private=False, current_version_number=2)
+    with pytest.raises(ValueError, match='public'):
+        client.publish_secrets(ref, {'HF_TOKEN': 'changed-value'}, state)
+
+
+def test_deploy_publishes_private_dataset_before_notebook_submission(project, monkeypatch):
+    root, settings, _ = project
+    (root / k.SECRETS_FILE).write_text('HF_TOKEN: fixture-value\n')
+    calls = []
+
+    def publish(ref, values, state):
+        calls.append('publish')
+        assert ref == 'fixtureuser/kdeploy-example-secrets'
+        assert values == {'HF_TOKEN': 'fixture-value'}
+
+    def submit(directory, accelerator):
+        calls.append('submit')
+        metadata = json.loads((directory / 'kernel-metadata.json').read_text())
+        assert metadata['dataset_sources'] == ['fixtureuser/kdeploy-example-secrets']
+        return SimpleNamespace(error='', version_number=1, ref='smoke', url='https://www.kaggle.com/code/canonicaluser/smoke')
+
+    client = SimpleNamespace(publish_secrets=publish, submit=submit, check_quota=lambda *args: None)
+    monkeypatch.setattr(k, 'api', lambda _: client)
+    assert k.main(['deploy', str(settings)]) == 0
+    assert calls == ['publish', 'submit']

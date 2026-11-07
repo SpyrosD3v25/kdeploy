@@ -26,6 +26,7 @@ from remote import inside, sha
 
 CONFIG = Path(os.getenv('XDG_CONFIG_HOME', Path.home() / '.config')) / 'kdeploy'
 STATE = Path(os.getenv('XDG_STATE_HOME', Path.home() / '.local/state')) / 'kdeploy'
+SECRETS_FILE = '.kdeploy-secrets.yaml'
 
 
 def write(path, value):
@@ -123,6 +124,35 @@ def api(profile):
     return KaggleClient(path, credentials)
 
 
+def read_secrets(root):
+    path = root / SECRETS_FILE
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('secrets file must be a regular file')
+    if git(root, 'ls-files', '--', SECRETS_FILE).strip():
+        raise ValueError('secrets file must not be tracked by Git')
+    try:
+        values = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        raise ValueError('invalid secrets YAML') from None
+    if not isinstance(values, dict) or not values:
+        raise ValueError('secrets YAML must be a nonempty string mapping')
+    for key, value in values.items():
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or not isinstance(value, str):
+            raise ValueError('secrets YAML must be a string mapping with environment variable keys')
+        if key.startswith(('KAGGLE_', 'KDEPLOY_')) or key in ('HOME', 'PATH', 'PYTHONHOME', 'PYTHONPATH'):
+            raise ValueError('secrets YAML contains a reserved environment variable')
+    return values
+
+
+def secrets_dataset_ref(owner, project):
+    slug = 'kdeploy-' + re.sub('[^a-z0-9-]+', '-', project['name'].lower()).strip('-') + '-secrets'
+    if len(slug) > 50:
+        slug = slug[:40].rstrip('-') + '-' + hashlib.sha256(project['root'].encode()).hexdigest()[:8]
+    return owner + '/' + slug
+
+
 def project_for(settings):
     matches = [(path, yaml.safe_load(path.read_text())) for path in (CONFIG / 'projects').glob('*.yaml')]
     selected = yaml.safe_load(settings.read_text()).get('project')
@@ -136,6 +166,8 @@ def project_for(settings):
 def snapshot(root, settings, exclude=()):
     buffer = io.BytesIO()
     paths = {Path(p.decode()) for p in git(root, 'ls-files', '-z').split(b'\0') if p}
+    if Path(SECRETS_FILE) in paths:
+        raise ValueError('secrets file must not be tracked by Git')
     skipped = {p for p in paths if any(p.match(pattern) for pattern in exclude)}
     paths -= skipped
     external = not settings.is_relative_to(root)
@@ -171,7 +203,11 @@ def snapshot(root, settings, exclude=()):
 def prepare(settings, project, profile, previous=None):
     root = Path(project['root'])
     _, credentials = account(profile)
+    secrets = read_secrets(root)
+    secrets_dataset = secrets_dataset_ref(credentials['username'], project) if secrets is not None else None
     if previous:
+        if previous.get('secrets_dataset') and secrets is None:
+            raise ValueError('continuation requires the project secrets YAML file')
         notebook = json.loads((STATE / 'runs' / previous['id'] / 'kernel.ipynb').read_text())
         invocation = ast.parse(notebook['cells'][0]['source']).body[-1].value
         payload = base64.b64decode(ast.literal_eval(invocation.args[0]), validate=True)
@@ -189,6 +225,7 @@ def prepare(settings, project, profile, previous=None):
               'git_commit': previous['git_commit'] if previous else git(root, 'rev-parse', 'HEAD').decode().strip(),
               'git_status': previous['git_status'] if previous else git(root, 'status', '--porcelain').decode(),
               'source_sha256': hashlib.sha256(payload).hexdigest(), 'configuration': project,
+              'secrets_dataset': secrets_dataset,
               'previous': {key: previous[key] for key in ('id', 'kernel')} if previous else None}
     directory = STATE / 'runs' / identifier
     code = Path(__file__).with_name('remote.py').read_text()
@@ -203,7 +240,8 @@ def prepare(settings, project, profile, previous=None):
     write(directory / 'kernel-metadata.json', {'id': record['kernel'], 'title': record['kernel'].split('/')[1],
         'code_file': 'kernel.ipynb', 'language': 'python', 'kernel_type': 'notebook', 'is_private': True,
         'enable_gpu': bool(project['gpu']), 'enable_internet': True, 'machine_shape': project['gpu'],
-        'dataset_sources': project['datasets'], 'kernel_sources': list(dict.fromkeys(sources))})
+        'dataset_sources': list(dict.fromkeys([*project['datasets'], *([secrets_dataset] if secrets_dataset else [])])),
+        'kernel_sources': list(dict.fromkeys(sources))})
     record['state'] = 'prepared'
     write(directory / 'run.json', record)
     return directory, record
@@ -368,6 +406,9 @@ def main(argv=None):
                         available = client.outputs(previous['kernel'])
                         if 'kdeploy-output/manifest.json' not in available:
                             raise ValueError('previous run has no finalized saved artifacts')
+                    secrets = read_secrets(Path(project['root']))
+                    if secrets is not None:
+                        client.publish_secrets(record['secrets_dataset'], secrets, STATE / 'secrets' / profile / project['name'] / 'state.json')
                     record['state'] = 'submitting'
                     write(directory / 'run.json', record)
                     with database.connect(STATE) as db:

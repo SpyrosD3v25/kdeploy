@@ -84,6 +84,16 @@ def run(bundle, record, project, work=Path('/kaggle/working'), inputs=Path('/kag
     env = {**os.environ, **{key: value.replace('{settings}', str(settings)) for key, value in project['env'].items()},
            'KDEPLOY_SETTINGS': str(settings), 'KDEPLOY_STARTED_AT': str(started),
            'PYTHONUNBUFFERED': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
+    secrets_dataset = record.get('secrets_dataset')
+    if secrets_dataset:
+        secrets_path = inputs / secrets_dataset.split('/')[1] / 'secrets.yaml'
+        if not secrets_path.is_file():
+            raise ValueError('attached kdeploy secrets dataset is missing')
+        secrets = json.loads(secrets_path.read_text())
+        if not isinstance(secrets, dict) or not all(isinstance(key, str) and isinstance(value, str)
+                                                     for key, value in secrets.items()):
+            raise ValueError('attached kdeploy secrets dataset is invalid')
+        env.update(secrets)
     code = 1
     try:
         with (output / 'run.log').open('w') as log:

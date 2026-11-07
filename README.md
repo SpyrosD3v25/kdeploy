@@ -51,6 +51,15 @@ Projects do not have a default account. Deploy selects the account whose latest 
 
 `project add` prints the configuration path under `~/.config/kdeploy/projects/`. Edit that YAML to set `command`, `setup`, `outputs` (directories, default `[results]`), `env`, `datasets`, `kernels` and `gpu` (default `NvidiaTeslaT4`; null for CPU). Nothing is written into the registered project. Setup and command run in separate shells; persistent environment values belong in `env`. `{settings}` works in commands and environment values; the launcher also sets `KDEPLOY_SETTINGS`.
 
+For credentials, put an untracked `.kdeploy-secrets.yaml` in the registered project root:
+
+```yaml
+HF_TOKEN: "replace-with-your-token"
+OTHER_API_KEY: "replace-with-another-key"
+```
+
+The file must contain a nonempty mapping of environment variable names to string values. Keep it out of Git and readable only by your user (`chmod 600 .kdeploy-secrets.yaml`). On deploy or continue, kdeploy creates or updates a private `kdeploy-<project>-secrets` dataset under the selected Kaggle account, attaches it to the submitted notebook, and loads its values into the setup and command environment. The same mechanism works for any key, not just `HF_TOKEN`. A dry run validates the file and shows the dataset reference without uploading it. Secret values are absent from notebook source, metadata, run records and logs produced by kdeploy. Kaggle retains values in private dataset version history when they change; revoke old credentials after rotation. Do not put credentials in the project's `env` mapping.
+
 ### 2. Deploy using a settings file
 
 ```bash

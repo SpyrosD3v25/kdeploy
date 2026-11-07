@@ -1,6 +1,11 @@
 """Kaggle-specific authentication, quota, notebook and output operations."""
+import hashlib
+import json
 import os
+import tempfile
+import time
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 
@@ -26,6 +31,47 @@ class KaggleClient:
 
     def submit(self, directory, accelerator):
         return self.client.kernels_push(str(directory), acc=accelerator or None)
+
+    def publish_secrets(self, ref, values, state_path):
+        payload = json.dumps(values, sort_keys=True, ensure_ascii=False).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        datasets = self.client.dataset_list(mine=True, search=ref.split('/')[1]) or []
+        existing = next((dataset for dataset in datasets if dataset and dataset.ref == ref), None)
+        if existing and not existing.is_private:
+            raise ValueError('kdeploy secrets dataset exists but is public')
+        state_path = Path(state_path)
+        previous = json.loads(state_path.read_text()) if state_path.is_file() else {}
+        version = existing.current_version_number if existing else None
+        if existing and previous == {'sha256': digest, 'version': version}:
+            return ref
+        with tempfile.TemporaryDirectory(prefix='kdeploy-secrets-') as temporary:
+            folder = Path(temporary)
+            secret_file = folder / 'secrets.yaml'
+            descriptor = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(payload)
+            (folder / 'dataset-metadata.json').write_text(json.dumps({
+                'title': 'kdeploy secrets', 'id': ref, 'licenses': [{'name': 'unknown'}]}))
+            if existing:
+                response = self.client.dataset_create_version(str(folder), 'Update kdeploy secrets', quiet=True,
+                                                              convert_to_csv=False)
+            else:
+                response = self.client.dataset_create_new(str(folder), public=False, quiet=True, convert_to_csv=False)
+            if response.error:
+                raise RuntimeError('Kaggle rejected the private secrets dataset upload')
+        deadline = time.monotonic() + 120
+        while True:
+            status = self.client.dataset_status(ref).lower()
+            if status in ('complete', 'ready'):
+                break
+            if status in ('error', 'failed') or time.monotonic() >= deadline:
+                raise RuntimeError('private secrets dataset did not become ready')
+            time.sleep(2)
+        state_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        temporary_state = state_path.with_suffix('.tmp')
+        temporary_state.write_text(json.dumps({'sha256': digest, 'version': (version or 0) + 1}))
+        temporary_state.replace(state_path)
+        return ref
 
     def check_quota(self, profile, accelerator):
         if not hasattr(self.client, 'quota_view'):
