@@ -349,7 +349,8 @@ def test_quota_exhaustion_stops_submission(project, monkeypatch, capsys):
     assert 'no accelerator hours remaining' in capsys.readouterr().err
 
 
-def test_secrets_yaml_attaches_private_dataset_without_entering_notebook(project, tmp_path, monkeypatch):
+@pytest.mark.parametrize('nested_mount', [False, True])
+def test_secrets_yaml_attaches_private_dataset_without_entering_notebook(project, tmp_path, monkeypatch, nested_mount):
     root, settings, config = project
     secret = 'fixture-value-never-print'
     (root / k.SECRETS_FILE).write_text('HF_TOKEN: ' + secret + '\nOTHER_KEY: another\n')
@@ -361,12 +362,13 @@ def test_secrets_yaml_attaches_private_dataset_without_entering_notebook(project
     assert record['secrets_dataset'] == ref
     for name in ('kernel.ipynb', 'kernel-metadata.json', 'run.json'):
         assert secret not in (directory / name).read_text()
-    inputs = tmp_path / 'inputs' / 'kdeploy-example-secrets'
+    input_root = tmp_path / 'inputs'
+    inputs = input_root / ('datasets/fixtureuser' if nested_mount else '') / 'kdeploy-example-secrets'
     inputs.mkdir(parents=True)
     (inputs / 'secrets.yaml').write_text(json.dumps({'HF_TOKEN': secret, 'OTHER_KEY': 'another'}))
     work = tmp_path / 'work'
     work.mkdir()
-    execute(directory, work, inputs.parent)
+    execute(directory, work, input_root)
     assert (work / 'kdeploy-output/files/results/seen.txt').read_text() == 'yes'
     assert secret not in (work / 'kdeploy-output/run.log').read_text()
 

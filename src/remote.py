@@ -86,9 +86,11 @@ def run(bundle, record, project, work=Path('/kaggle/working'), inputs=Path('/kag
            'PYTHONUNBUFFERED': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
     secrets_dataset = record.get('secrets_dataset')
     if secrets_dataset:
-        secrets_path = inputs / secrets_dataset.split('/')[1] / 'secrets.yaml'
-        if not secrets_path.is_file():
-            raise ValueError('attached kdeploy secrets dataset is missing')
+        slug = secrets_dataset.split('/')[1]
+        matches = [path for path in inputs.rglob('secrets.yaml') if slug in path.parts and path.is_file()]
+        if len(matches) != 1:
+            raise ValueError(f'expected one attached kdeploy secrets dataset file; found {len(matches)}')
+        secrets_path = matches[0]
         secrets = json.loads(secrets_path.read_text())
         if not isinstance(secrets, dict) or not all(isinstance(key, str) and isinstance(value, str)
                                                      for key, value in secrets.items()):
