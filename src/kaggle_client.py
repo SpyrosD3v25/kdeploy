@@ -61,11 +61,14 @@ class KaggleClient:
                 raise RuntimeError('Kaggle rejected the private secrets dataset upload')
         deadline = time.monotonic() + 120
         while True:
-            status = self.client.dataset_status(ref).lower()
-            if status in ('complete', 'ready'):
+            datasets = self.client.dataset_list(mine=True, search=ref.split('/')[1]) or []
+            uploaded = next((d for d in datasets if d and d.ref == ref), None)
+            if uploaded and not uploaded.is_private:
+                raise RuntimeError('private secrets dataset unexpectedly became public')
+            if uploaded and (uploaded.current_version_number or 0) >= (version or 0) + 1:
                 break
-            if status in ('error', 'failed') or time.monotonic() >= deadline:
-                raise RuntimeError('private secrets dataset did not become ready')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('private secrets dataset version not visible after upload')
             time.sleep(2)
         state_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         temporary_state = state_path.with_suffix('.tmp')
