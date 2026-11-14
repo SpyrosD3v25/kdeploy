@@ -49,7 +49,9 @@ kdeploy project list
 
 Projects do not have a default account. Deploy selects the account whose latest run status was updated least recently, with unused accounts first. The selected account is checked for an active kdeploy run and, for accelerator jobs, remaining Kaggle quota. If it is busy, out of hours, or its quota cannot be checked, deployment exits with a message. Override selection with `--account NAME`. Dry runs do not contact Kaggle or change rotation. Run statuses and accounts are stored in `~/.local/state/kdeploy/kdeploy.sqlite3`; submitted runs from the previous file-based format are imported when deploying. Statuses are refreshed on `status` or when an account is selected, not by a background service.
 
-`project add` prints the configuration path under `~/.config/kdeploy/projects/`. Edit that YAML to set `command`, `setup`, `outputs` (directories, default `[results]`), `env`, `datasets`, `kernels` and `gpu` (default `NvidiaTeslaT4`; null for CPU). Nothing is written into the registered project. Setup and command run in separate shells; persistent environment values belong in `env`. `{settings}` works in commands and environment values; the launcher also sets `KDEPLOY_SETTINGS`.
+`project add` prints the configuration path under `~/.config/kdeploy/projects/`. Edit that YAML to set `command`, `setup`, `outputs` (directories, default `[results]`), `env`, `datasets`, `kernels` and `gpu` (default `NvidiaTeslaT4`; null for CPU).
+
+To run a **CPU-only** job without changing the saved project configuration, use `kdeploy deploy SETTINGS --cpu`. For evaluation or other one-off workloads, use `--command 'python cli evaluate --settings {settings}'` and optionally `--setup 'python -m pip install -r requirements.txt'`. These overrides apply to this deployment only and are recorded in the run snapshot; `kdeploy continue SETTINGS` retains the run's CPU choice, setup, and command. CPU jobs do not check GPU quota. The project's own settings must also select CPU if its application would otherwise require CUDA. Nothing is written into the registered project. Setup and command run in separate shells; persistent environment values belong in `env`. `{settings}` works in commands and environment values; the launcher also sets `KDEPLOY_SETTINGS`.
 
 For credentials, put an untracked `.kdeploy-secrets.yaml` in the registered project root:
 
@@ -101,6 +103,8 @@ This implementation uses the [official Kaggle API](https://github.com/Kaggle/kag
 | `kdeploy status SETTINGS` | Check a run's status |
 | `kdeploy logs SETTINGS` | Read a run's logs |
 | `kdeploy download SETTINGS` | Download verified outputs; supports `--to PATH` |
+
+For `kdeploy deploy`, `--cpu` disables accelerators while `--command` and `--setup` override the registered project command and setup for that run. The registered project YAML remains unchanged.
 
 Run `kdeploy --help` or `kdeploy COMMAND --help` for more options.
 
