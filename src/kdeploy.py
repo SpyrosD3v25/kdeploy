@@ -313,6 +313,10 @@ def main(argv=None):
         command.add_argument('--account')
         if kind in ('deploy', 'continue'):
             command.add_argument('--dry-run', action='store_true', help='prepare and inspect without contacting Kaggle')
+        if kind == 'deploy':
+            command.add_argument('--cpu', action='store_true', help='run without an accelerator (no GPU quota)')
+            command.add_argument('--command', dest='entry', help='override project command for this deployment')
+            command.add_argument('--setup', dest='setup_override', help='override project setup for this deployment')
         else:
             command.add_argument('--run', help='submitted run ID; default: latest matching run')
         if kind == 'download':
@@ -365,6 +369,14 @@ def main(argv=None):
         if not isinstance(yaml.safe_load(settings.read_text()), dict):
             raise ValueError('settings must contain a YAML mapping')
         _, project = project_for(settings)
+        if args.command == 'deploy':
+            project = {**project}
+            if args.cpu:
+                project['gpu'] = None
+            if args.entry is not None:
+                project['command'] = args.entry
+            if args.setup_override is not None:
+                project['setup'] = args.setup_override
         if not isinstance(project['outputs'], list) or not project['outputs'] or not all(isinstance(item, str) and item for item in project['outputs']) or len(set(project['outputs'])) != len(project['outputs']):
             raise ValueError('project outputs must be a nonempty list of relative directories')
         for output in project['outputs']:
@@ -379,6 +391,8 @@ def main(argv=None):
             with lock_path.open('w') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 previous = latest(settings, args.account)[1] if args.command == 'continue' else None
+                if previous:
+                    project = previous['configuration']
                 if previous and previous['settings_sha256'] != sha(settings):
                     raise ValueError('settings changed since the previous run; use deploy for a new configuration')
                 with database.connect(STATE) as db:
