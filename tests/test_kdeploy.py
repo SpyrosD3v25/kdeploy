@@ -101,6 +101,64 @@ def execute(directory, work, inputs):
     namespace['run'](*(ast.literal_eval(arg) for arg in args),work=work,inputs=inputs)
 
 
+
+def test_cpu_deployment_overrides_are_isolated_and_persist_on_continue(project, monkeypatch):
+    root, settings, config = project
+    args = ['deploy', str(settings), '--dry-run', '--cpu',
+            '--command', 'python train.py --settings {settings}',
+            '--setup', 'echo cpu-setup']
+    monkeypatch.setattr(k, 'api', lambda _: pytest.fail('dry run must not authenticate'))
+    assert k.main(args) == 0
+    directory = next((k.STATE / 'runs').iterdir())
+    record = json.loads((directory / 'run.json').read_text())
+    assert record['configuration']['gpu'] is None
+    assert record['configuration']['command'] == 'python train.py --settings {settings}'
+    assert record['configuration']['setup'] == 'echo cpu-setup'
+    metadata = json.loads((directory / 'kernel-metadata.json').read_text())
+    assert metadata['enable_gpu'] is False
+    assert metadata['machine_shape'] is None
+    # The saved project configuration must not be rewritten by per-run overrides.
+    saved = yaml.safe_load((k.CONFIG / 'projects/example.yaml').read_text())
+    assert saved['gpu'] == 'NvidiaTeslaT4'
+    assert saved['setup'] == ''
+    assert saved['command'] == config['command']
+    # Continue must use the saved CPU configuration, not the registered GPU defaults.
+    record['state'] = 'submitted'
+    k.write(directory / 'run.json', record)
+    client = SimpleNamespace(status=lambda _: SimpleNamespace(status='complete'),
+                             outputs=lambda _: {'kdeploy-output/manifest.json': 'url'},
+                             submit=lambda *a: SimpleNamespace(error='', version_number=2,
+                                                               url='https://www.kaggle.com/code/fixtureuser/continued'))
+    monkeypatch.setattr(k, 'api', lambda _: client)
+    monkeypatch.setattr(k, 'select_account', lambda db, requested, dry_run, accelerator:
+                        ('research' if accelerator is None else pytest.fail('CPU continuation checked GPU quota')))
+    assert k.main(['continue', str(settings), '--dry-run']) == 0
+    records = [json.loads(path.read_text()) for path in (k.STATE / 'runs').glob('*/run.json')]
+    assert len(records) == 2
+    assert all(row['configuration']['gpu'] is None for row in records)
+
+
+def test_cpu_deployment_avoids_accelerator_quota(project, monkeypatch):
+    _, settings, _ = project
+    calls = []
+
+    def selected(db, requested, dry_run, accelerator):
+        calls.append(accelerator)
+        return 'research'
+
+    def submitted(directory, accelerator):
+        calls.append(accelerator)
+        metadata = json.loads((directory / 'kernel-metadata.json').read_text())
+        assert metadata['enable_gpu'] is False
+        assert metadata['machine_shape'] is None
+        return SimpleNamespace(error='', version_number=1, url='https://www.kaggle.com/code/fixtureuser/cpu')
+
+    monkeypatch.setattr(k, 'select_account', selected)
+    monkeypatch.setattr(k, 'api', lambda _: SimpleNamespace(submit=submitted))
+    assert k.main(['deploy', str(settings), '--cpu']) == 0
+    assert calls == [None, None]
+
+
 def test_snapshot_preserves_original_head_dirty_source_and_settings(project,tmp_path):
     root,settings,config=project
     (root/'train.py').write_text((root/'train.py').read_text()+'print("dirty edit")\n')
