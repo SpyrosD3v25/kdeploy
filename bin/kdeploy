@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-exec /home/spirosdev25/miniconda3/bin/python "$(dirname -- "$(readlink -f -- "$0")")/../src/kdeploy.py" "$@"
+exec /usr/bin/env python "$(dirname -- "$(readlink -f -- "$0")")/../src/kdeploy.py" "$@"
